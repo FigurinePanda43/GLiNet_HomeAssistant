@@ -2,7 +2,6 @@
 import hashlib
 import json
 import logging
-import subprocess
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -23,161 +22,126 @@ class GLiNetAPI:
         self.session.timeout = 10
 
     def authenticate(self) -> bool:
-        """Authenticate with the router."""
+        """Authenticate with the router (GL.iNet 4.x).
+
+        The login is a challenge/response: the router returns the crypt(3)
+        algorithm id (``alg``) and the digest to use for the final hash
+        (``hash-method``). Both vary with firmware (4.3.x: alg 1 / md5,
+        4.8.x: alg 5 / sha256), so both are read from the challenge.
+        """
         try:
-            # Get challenge
-            challenge_data = {
-                "jsonrpc": "2.0",
-                "method": "challenge",
-                "params": {"username": self.username},
-                "id": 0
-            }
-            
-            response = self.session.post(
-                f"http://{self.host}/rpc",
-                json=challenge_data,
-                headers={"Content-Type": "application/json"}
-            )
-            response.raise_for_status()
-            
-            challenge_result = response.json()
-            if "result" not in challenge_result:
-                _LOGGER.error("No result in challenge response")
+            challenge = self._get_challenge()
+            if not challenge:
                 return False
-                
-            result = challenge_result["result"]
-            alg = result.get("alg")
-            salt = result.get("salt")
-            nonce = result.get("nonce")
-            
-            if not all([alg, salt, nonce]):
-                _LOGGER.error("Missing challenge parameters")
-                return False
-            
-            # Create cipher password using mkpasswd equivalent
-            cipher_password = self._create_cipher_password(salt, self.password)
-            
-            # Create hash
-            hash_string = f"{self.username}:{cipher_password}:{nonce}"
-            hash_value = hashlib.md5(hash_string.encode()).hexdigest()
-            
-            # Login
-            login_data = {
-                "jsonrpc": "2.0",
-                "method": "login",
-                "params": {"username": self.username, "hash": hash_value},
-                "id": 0
-            }
-            
-            response = self.session.post(
-                f"http://{self.host}/rpc",
-                json=login_data,
-                headers={"Content-Type": "application/json"}
-            )
-            response.raise_for_status()
-            
-            login_result = response.json()
-            if "result" in login_result and "sid" in login_result["result"]:
-                self.sid = login_result["result"]["sid"]
-                _LOGGER.debug("Authentication successful")
-                return True
-            else:
-                _LOGGER.error("Authentication failed: %s", login_result)
-                return False
-                
+            alg, salt, nonce, adv_method = challenge
+
+            methods = [adv_method] + [
+                m for m in ("sha256", "md5", "sha512") if m != adv_method
+            ]
+
+            for i, method in enumerate(methods):
+                if i > 0:
+                    # The nonce is single-use, so each retry needs a new challenge.
+                    ch = self._get_challenge()
+                    if not ch:
+                        continue
+                    alg, salt, nonce, _ = ch
+
+                cipher = self._create_cipher_password(salt, self.password, alg)
+                hash_value = hashlib.new(
+                    method, f"{self.username}:{cipher}:{nonce}".encode()
+                ).hexdigest()
+
+                sid = self._do_login(hash_value)
+                if sid:
+                    self.sid = sid
+                    _LOGGER.debug(
+                        "Authentication successful (alg=%s, hash=%s)", alg, method
+                    )
+                    return True
+
+            _LOGGER.error("Authentication failed (tried: %s)", methods)
+            return False
+
         except Exception as exc:
             _LOGGER.error("Authentication error: %s", exc)
             return False
 
-    def _create_cipher_password(self, salt: str, password: str) -> str:
-        """Create cipher password using MD5 crypt."""
-        try:
-            # Use subprocess to call mkpasswd if available
-            result = subprocess.run(
-                ["mkpasswd", "-m", "md5", "-S", salt, password],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            return result.stdout.strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            # Fallback to Python implementation
-            return self._md5_crypt(password, salt)
+    def _get_challenge(self) -> Optional[tuple]:
+        """Request a login challenge.
 
-    def _md5_crypt(self, password: str, salt: str) -> str:
-        """Python implementation of MD5 crypt."""
-        # This is a simplified version - for production use a proper crypt library
-        magic = "$1$"
-        if salt.startswith(magic):
-            salt = salt[len(magic):]
-        
-        # Take only first 8 characters of salt
-        salt = salt[:8]
-        
-        # Create the hash
-        ctx = hashlib.md5()
-        ctx.update(password.encode())
-        ctx.update(magic.encode())
-        ctx.update(salt.encode())
-        
-        ctx1 = hashlib.md5()
-        ctx1.update(password.encode())
-        ctx1.update(salt.encode())
-        ctx1.update(password.encode())
-        final = ctx1.digest()
-        
-        for i in range(len(password)):
-            ctx.update(final[i % 16:i % 16 + 1])
-            
-        for i in range(len(password)):
-            if i & 1:
-                ctx.update(b'\0')
-            else:
-                ctx.update(password[0:1].encode())
-                
-        final = ctx.digest()
-        
-        # 1000 iterations
-        for i in range(1000):
-            ctx1 = hashlib.md5()
-            if i & 1:
-                ctx1.update(password.encode())
-            else:
-                ctx1.update(final)
-                
-            if i % 3:
-                ctx1.update(salt.encode())
-                
-            if i % 7:
-                ctx1.update(password.encode())
-                
-            if i & 1:
-                ctx1.update(final)
-            else:
-                ctx1.update(password.encode())
-                
-            final = ctx1.digest()
-        
-        # Convert to base64-like encoding
-        itoa64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-        
-        def to64(v, n):
-            result = ""
-            while n > 0:
-                result += itoa64[v & 0x3f]
-                v >>= 6
-                n -= 1
-            return result
-        
-        result = magic + salt + "$"
-        result += to64((final[0] << 16) | (final[6] << 8) | final[12], 4)
-        result += to64((final[1] << 16) | (final[7] << 8) | final[13], 4)
-        result += to64((final[2] << 16) | (final[8] << 8) | final[14], 4)
-        result += to64((final[3] << 16) | (final[9] << 8) | final[15], 4)
-        result += to64((final[4] << 16) | (final[10] << 8) | final[5], 4)
-        result += to64(final[11], 2)
-        
-        return result
+        Return ``(alg, salt, nonce, hash_method)`` or ``None`` on failure.
+        """
+        try:
+            response = self.session.post(
+                f"http://{self.host}/rpc",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "challenge",
+                    "params": {"username": self.username},
+                    "id": 0,
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+
+            result = response.json().get("result")
+            if not result:
+                _LOGGER.error("No result in challenge response")
+                return None
+
+            alg = result.get("alg")
+            salt = result.get("salt")
+            nonce = result.get("nonce")
+            hash_method = (result.get("hash-method") or "md5").lower()
+
+            if not all([alg, salt, nonce]):
+                _LOGGER.error("Missing challenge parameters")
+                return None
+
+            return int(alg), salt, nonce, hash_method
+
+        except Exception as exc:
+            _LOGGER.error("Challenge error: %s", exc)
+            return None
+
+    def _do_login(self, hash_value: str) -> Optional[str]:
+        """Send the login request with the computed hash. Return the sid."""
+        try:
+            response = self.session.post(
+                f"http://{self.host}/rpc",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "login",
+                    "params": {"username": self.username, "hash": hash_value},
+                    "id": 0,
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            return (response.json().get("result") or {}).get("sid")
+
+        except Exception as exc:
+            _LOGGER.error("Login error: %s", exc)
+            return None
+
+    def _create_cipher_password(self, salt: str, password: str, alg: int = 5) -> str:
+        """Build the crypt(3) cipher matching the algorithm from the challenge.
+
+        ``rounds=5000`` keeps the output free of a ``rounds=`` field, matching
+        glibc crypt and ``openssl passwd -5``, which is what the router uses.
+        """
+        from passlib.hash import md5_crypt, sha256_crypt, sha512_crypt
+
+        salt = salt[:16]
+
+        if alg == 1:
+            return md5_crypt.using(salt=salt[:8]).hash(password)
+        if alg == 6:
+            return sha512_crypt.using(salt=salt, rounds=5000).hash(password)
+        return sha256_crypt.using(salt=salt, rounds=5000).hash(password)
 
     def _make_rpc_call(self, service: str, method: str, params: Optional[Dict] = None) -> Optional[Dict]:
         """Make an RPC call to the router."""
