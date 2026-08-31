@@ -1,5 +1,6 @@
 """Data update coordinator for GL.iNet integration."""
 import logging
+import time
 from datetime import timedelta
 from typing import Any, Dict
 
@@ -10,6 +11,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import GLiNetAPI
 from .const import CONF_HOST, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .traffic import TrafficTracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ class GLiNetDataUpdateCoordinator(DataUpdateCoordinator):
             entry.data[CONF_USERNAME],
             entry.data[CONF_PASSWORD]
         )
+        self.traffic = TrafficTracker()
         
         super().__init__(
             hass,
@@ -64,6 +67,9 @@ class GLiNetDataUpdateCoordinator(DataUpdateCoordinator):
             wifi_status_detail = await self.hass.async_add_executor_job(self.api.get_wifi_status)
             clients = await self.hass.async_add_executor_job(self.api.get_clients)
             
+            # The router exposes no WAN counter; traffic is summed per client.
+            traffic = self.traffic.update(clients, time.monotonic())
+            
             return {
                 "vpn_status": vpn_status,
                 "system_status": system_status,
@@ -84,6 +90,7 @@ class GLiNetDataUpdateCoordinator(DataUpdateCoordinator):
                 "wifi_config": wifi_config,
                 "wifi_status_detail": wifi_status_detail,
                 "clients": clients,
+                "traffic": traffic,
             }
             
         except Exception as exc:

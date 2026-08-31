@@ -11,6 +11,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
+    UnitOfDataRate,
     UnitOfInformation,
     UnitOfTemperature,
     UnitOfTime
@@ -252,6 +253,39 @@ SENSOR_DESCRIPTIONS = [
         name="WiFi Devices Status",
         icon="mdi:wifi",
     ),
+    # Traffic, summed from the per-client counters
+    SensorEntityDescription(
+        key="download_speed",
+        name="Download Speed",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:download-network",
+    ),
+    SensorEntityDescription(
+        key="upload_speed",
+        name="Upload Speed",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:upload-network",
+    ),
+    SensorEntityDescription(
+        key="total_downloaded",
+        name="Total Downloaded",
+        native_unit_of_measurement=UnitOfInformation.BYTES,
+        device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        icon="mdi:download",
+    ),
+    SensorEntityDescription(
+        key="total_uploaded",
+        name="Total Uploaded",
+        native_unit_of_measurement=UnitOfInformation.BYTES,
+        device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        icon="mdi:upload",
+    ),
 ]
 
 
@@ -305,11 +339,24 @@ class GLiNetSensor(CoordinatorEntity, SensorEntity):
         wg_server_status = self.coordinator.data.get("wg_server_status", {})
         ovpn_server_status = self.coordinator.data.get("ovpn_server_status", {})
         wifi_status_detail = self.coordinator.data.get("wifi_status_detail", {})
+        traffic = self.coordinator.data.get("traffic", {})
         
         key = self.entity_description.key
         
+        # Traffic
+        if key in ("download_speed", "upload_speed"):
+            rate = traffic.get("rx_rate" if key == "download_speed" else "tx_rate")
+            # None until a second reading is in: no rate can be derived from one.
+            return round(rate * 8 / 1_000_000, 2) if rate is not None else None
+        
+        elif key == "total_downloaded":
+            return traffic.get("rx_bytes")
+        
+        elif key == "total_uploaded":
+            return traffic.get("tx_bytes")
+        
         # VPN Status
-        if key == "vpn_status":
+        elif key == "vpn_status":
             if vpn_status.get("status") == 1:
                 return "Connected"
             return "Disconnected"
@@ -507,10 +554,21 @@ class GLiNetSensor(CoordinatorEntity, SensorEntity):
         wg_server_config = self.coordinator.data.get("wg_server_config", {})
         ovpn_server_status = self.coordinator.data.get("ovpn_server_status", {})
         wifi_status_detail = self.coordinator.data.get("wifi_status_detail", {})
+        traffic = self.coordinator.data.get("traffic", {})
         
         key = self.entity_description.key
         
-        if key == "vpn_status":
+        if key in ("download_speed", "upload_speed",
+                   "total_downloaded", "total_uploaded"):
+            return {
+                "clients_counted": traffic.get("clients_counted"),
+                "clients_online": traffic.get("clients_online"),
+                # Summed over LAN clients, so this is not strictly WAN traffic:
+                # a transfer between two local devices counts towards it too.
+                "source": "sum of per-client counters",
+            }
+        
+        elif key == "vpn_status":
             return {
                 "name": vpn_status.get("name"),
                 "ipv4": vpn_status.get("ipv4"),
