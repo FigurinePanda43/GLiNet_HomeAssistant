@@ -563,9 +563,12 @@ class GLiNetSensor(CoordinatorEntity, SensorEntity):
             return {
                 "clients_counted": traffic.get("clients_counted"),
                 "clients_online": traffic.get("clients_online"),
-                # Summed over LAN clients, so this is not strictly WAN traffic:
-                # a transfer between two local devices counts towards it too.
-                "source": "sum of per-client counters",
+                # The router accounts traffic per client on its routed path, so
+                # in practice this tracks WAN traffic. Device-to-device transfers
+                # within the same LAN are switched at layer 2 and never reach
+                # that path, so they are very likely not counted -- but that has
+                # not been measured, unlike the WAN figures.
+                "source": "sum of per-client counters (routed traffic)",
             }
         
         elif key == "vpn_status":

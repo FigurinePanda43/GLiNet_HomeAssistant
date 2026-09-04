@@ -15,6 +15,12 @@ of traffic data, and each client entry carries:
 
 So the rate is derived from successive counter readings instead.
 
+Scope: these counters are per-client accounting on the router's routed path.
+That makes them a good proxy for WAN traffic -- which is what the download
+above measured -- but traffic between two devices on the same LAN is switched
+without traversing that path, so it is very likely absent from these figures.
+That part has not been measured.
+
 This module holds no Home Assistant imports on purpose: the arithmetic is the
 part worth unit-testing.
 """
