@@ -13,9 +13,12 @@ _SPEC.loader.exec_module(glinet_traffic)
 TrafficTracker = glinet_traffic.TrafficTracker
 
 
-def client(mac, rx, tx):
+def client(mac, rx, tx, iface=None):
     """A client entry as the router sends it: counters as strings."""
-    return {"mac": mac, "total_rx": str(rx), "total_tx": str(tx)}
+    entry = {"mac": mac, "total_rx": str(rx), "total_tx": str(tx)}
+    if iface:
+        entry["iface"] = iface
+    return entry
 
 
 class TestTotals(unittest.TestCase):
@@ -114,6 +117,83 @@ class TestRates(unittest.TestCase):
         result = self.tracker.update(
             [client("mac", 461_039_523_647 + 87_201_912, 104_091_700_352)], 10.7)
         self.assertAlmostEqual(result["rx_rate"] * 8 / 1e6, 65.2, places=1)
+
+
+class TestPerLinkBreakdown(unittest.TestCase):
+    """The same counters, grouped by the link each client is attached through."""
+
+    def setUp(self):
+        self.tracker = TrafficTracker()
+
+    def test_splits_wired_from_wireless(self):
+        result = self.tracker.update([
+            client("a", 1000, 100, "cable"),
+            client("b", 200, 20, "5G"),
+            client("c", 300, 30, "2G"),
+        ], 0.0)
+        by_link = result["by_link"]
+        self.assertEqual(by_link["wired"]["rx_bytes"], 1000)
+        self.assertEqual(by_link["wireless"]["rx_bytes"], 500)
+
+    def test_keeps_each_interface_separately(self):
+        result = self.tracker.update([
+            client("b", 200, 20, "5G"),
+            client("c", 300, 30, "2G"),
+        ], 0.0)
+        self.assertEqual(result["by_link"]["5G"]["rx_bytes"], 200)
+        self.assertEqual(result["by_link"]["2G"]["rx_bytes"], 300)
+
+    def test_wired_and_wireless_sum_back_to_the_total(self):
+        result = self.tracker.update([
+            client("a", 1000, 100, "cable"),
+            client("b", 200, 20, "5G"),
+        ], 0.0)
+        by_link = result["by_link"]
+        self.assertEqual(
+            by_link["wired"]["rx_bytes"] + by_link["wireless"]["rx_bytes"],
+            result["rx_bytes"])
+
+    def test_client_without_iface_counts_as_wireless_and_adds_no_own_bucket(self):
+        result = self.tracker.update([client("a", 100, 10)], 0.0)
+        self.assertEqual(result["by_link"]["wireless"]["rx_bytes"], 100)
+        # Both aggregates always exist; no per-iface bucket without an iface.
+        self.assertEqual(sorted(result["by_link"]), ["wired", "wireless"])
+
+    def test_both_aggregates_exist_even_when_one_side_is_empty(self):
+        result = self.tracker.update([client("a", 100, 10, "cable")], 0.0)
+        self.assertEqual(result["by_link"]["wireless"]["rx_bytes"], 0)
+
+    def test_empty_side_reports_a_zero_rate_not_none(self):
+        self.tracker.update([client("a", 0, 0, "cable")], 0.0)
+        result = self.tracker.update([client("a", 100, 10, "cable")], 30.0)
+        self.assertEqual(result["wireless_rx_rate"], 0)
+
+    def test_per_link_rates(self):
+        self.tracker.update([
+            client("a", 0, 0, "cable"),
+            client("b", 0, 0, "5G"),
+        ], 0.0)
+        result = self.tracker.update([
+            client("a", 3_000_000, 0, "cable"),
+            client("b", 300_000, 0, "5G"),
+        ], 30.0)
+        self.assertAlmostEqual(result["wired_rx_rate"], 100_000.0)
+        self.assertAlmostEqual(result["wireless_rx_rate"], 10_000.0)
+
+    def test_no_per_link_rate_on_the_first_reading(self):
+        result = self.tracker.update([client("a", 100, 10, "cable")], 0.0)
+        self.assertIsNone(result["wired_rx_rate"])
+        self.assertIsNone(result["wireless_rx_rate"])
+
+    def test_link_with_no_clients_reports_no_rate(self):
+        result = self.tracker.update([client("a", 100, 10, "cable")], 0.0)
+        self.assertIsNone(result["wireless_rx_rate"])
+
+    def test_roaming_client_moves_its_counters_to_the_new_link(self):
+        self.tracker.update([client("a", 1000, 100, "5G")], 0.0)
+        result = self.tracker.update([client("a", 1000, 100, "cable")], 30.0)
+        self.assertEqual(result["by_link"]["wired"]["rx_bytes"], 1000)
+        self.assertEqual(result["by_link"]["wireless"]["rx_bytes"], 0)
 
 
 if __name__ == "__main__":
