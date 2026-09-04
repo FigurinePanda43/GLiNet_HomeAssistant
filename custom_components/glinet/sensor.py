@@ -25,6 +25,16 @@ from .coordinator import GLiNetDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+# Rate sensor key -> the field TrafficTracker publishes it under.
+TRAFFIC_RATE_FIELDS = {
+    "download_speed": "rx_rate",
+    "upload_speed": "tx_rate",
+    "wired_download_speed": "wired_rx_rate",
+    "wired_upload_speed": "wired_tx_rate",
+    "wireless_download_speed": "wireless_rx_rate",
+    "wireless_upload_speed": "wireless_tx_rate",
+}
+
 SENSOR_DESCRIPTIONS = [
     # VPN Status
     SensorEntityDescription(
@@ -286,6 +296,39 @@ SENSOR_DESCRIPTIONS = [
         state_class=SensorStateClass.TOTAL_INCREASING,
         icon="mdi:upload",
     ),
+    # Same traffic, split by the link the client is attached through
+    SensorEntityDescription(
+        key="wired_download_speed",
+        name="Wired Download Speed",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:ethernet",
+    ),
+    SensorEntityDescription(
+        key="wired_upload_speed",
+        name="Wired Upload Speed",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:ethernet",
+    ),
+    SensorEntityDescription(
+        key="wireless_download_speed",
+        name="WiFi Download Speed",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:wifi-arrow-down",
+    ),
+    SensorEntityDescription(
+        key="wireless_upload_speed",
+        name="WiFi Upload Speed",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:wifi-arrow-up",
+    ),
 ]
 
 
@@ -344,8 +387,8 @@ class GLiNetSensor(CoordinatorEntity, SensorEntity):
         key = self.entity_description.key
         
         # Traffic
-        if key in ("download_speed", "upload_speed"):
-            rate = traffic.get("rx_rate" if key == "download_speed" else "tx_rate")
+        if key in TRAFFIC_RATE_FIELDS:
+            rate = traffic.get(TRAFFIC_RATE_FIELDS[key])
             # None until a second reading is in: no rate can be derived from one.
             return round(rate * 8 / 1_000_000, 2) if rate is not None else None
         
@@ -558,9 +601,10 @@ class GLiNetSensor(CoordinatorEntity, SensorEntity):
         
         key = self.entity_description.key
         
-        if key in ("download_speed", "upload_speed",
-                   "total_downloaded", "total_uploaded"):
+        if key in TRAFFIC_RATE_FIELDS or key in ("total_downloaded",
+                                                  "total_uploaded"):
             return {
+                "by_link": traffic.get("by_link"),
                 "clients_counted": traffic.get("clients_counted"),
                 "clients_online": traffic.get("clients_online"),
                 # The router accounts traffic per client on its routed path, so
